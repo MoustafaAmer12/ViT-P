@@ -10,11 +10,11 @@ student:
   # pretrained_weights: './checkpoint.pth'
   pretrained_weights: '/kaggle/input/dinov2/pytorch/base/1/dinov2_vitb14_pretrain.pth'
 optim:
-  epochs: 100
+  epochs: 30
   # warmup_epochs: 1
   warmup_epochs: 0
   lr: 1e-2
 crops:
   global_crops_size: [518, 1036]
 evaluation:
-  eval_period_iterations: 12000
+  eval_period_iterations: 1116

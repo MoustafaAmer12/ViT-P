@@ -134,14 +134,18 @@ def do_test(cfg, model, data_loader, iteration):
     logger.info("running validation !")
 
     num_classes = cfg.student.num_classes
-    metric = build_metric(MetricType.MEAN_ACCURACY, num_classes=num_classes)
-    metric = metric.cuda()
+
+    # Initialize evaluation metrics
+    eval_mIoU = build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda()
+    eval_pixel_accuracy = build_metric(
+        MetricType.MEAN_ACCURACY, num_classes=num_classes
+    ).cuda()
+    # Add other CityScapes specific metrics here if needed, e.g., PER_CLASS_ACCURACY
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Evaluation:"
 
     for data in metric_logger.log_every(data_loader, 100, header):
-
         logits = model.student.backbone(
             data["image"].cuda(non_blocking=True),
             data["points"].cuda(non_blocking=True),
@@ -149,41 +153,34 @@ def do_test(cfg, model, data_loader, iteration):
         outputs = model.student.dino_head(logits)
         targets = data["label"].cuda(non_blocking=True)
 
-        metric_inputs = {
-            "preds": outputs.reshape(-1, num_classes),
-            "target": targets.reshape(-1),
-        }
-        metric.update(**metric_inputs)
+        # Reshape outputs and targets for segmentation metrics
+        preds_flat = outputs.argmax(dim=1).reshape(-1)  # Take argmax for predictions
+        targets_flat = targets.reshape(-1)
+
+        # Update mIoU and pixel accuracy
+        eval_mIoU.update(preds=preds_flat, target=targets_flat)
+        eval_pixel_accuracy.update(preds=preds_flat, target=targets_flat)
 
     metric_logger.synchronize_between_processes()
     logger.info(f"Averaged stats: {metric_logger}")
 
-    results_dict_temp = metric.compute()
-    metric_logger_stats = {
-        k: meter.global_avg for k, meter in metric_logger.meters.items()
-    }
+    # Compute and log summarized evaluation metrics
+    mIoU_results = eval_mIoU.compute()
+    pixel_accuracy_results = eval_pixel_accuracy.compute()
 
-    logger.info("")
+    logger.info(f"Validation Mean IoU: {mIoU_results.get('mean_iou', 'N/A')}")
+    logger.info(
+        f"Validation Pixel Accuracy: {pixel_accuracy_results.get('top-1', 'N/A')}"
+    )
+    # Log other computed metrics as needed
 
-    max_accuracy = 0
-    top1_accuracy = results_dict_temp["top-1"]
-    top5_accuracy = results_dict_temp["top-5"]
-
-    if top1_accuracy > max_accuracy:
-        max_accuracy = top1_accuracy
-
-    logger.info(f"Top_1_accuracy: {top1_accuracy}")
-    logger.info(f"Top_5_accuracy: {top5_accuracy}")
-    # logger.info(f"max_accuracy: {max_accuracy}")
+    # You can also update the metric_logger with these computed values
+    metric_logger.update(val_mIoU=mIoU_results.get("mean_iou", 0.0))
+    metric_logger.update(val_pixel_accuracy=pixel_accuracy_results.get("top-1", 0.0))
 
     new_state_dict = model.student["backbone"].state_dict()
 
     if distributed.is_main_process():
-        # iterstring = str(iteration)
-        # eval_dir = os.path.join(cfg.train.output_dir, "eval", iterstring)
-        # os.makedirs(eval_dir, exist_ok=True)
-        # # save teacher checkpoint
-        # ckp_path = os.path.join(eval_dir, "teacher_checkpoint.pth")
         ckp_path = "./checkpoint.pth"
         torch.save(new_state_dict, ckp_path)
 
@@ -194,7 +191,6 @@ def do_train(cfg, model, resume=False):
     fp16_scaler = model.fp16_scaler  # for mixed precision training
 
     # setup optimizer
-
     # optimizer = build_optimizer(cfg, model.get_params_groups())
 
     named_parameters = list(model.student["backbone"].named_parameters())
@@ -237,19 +233,25 @@ def do_train(cfg, model, resume=False):
     # ) = build_schedulers(cfg)
 
     # checkpointer
-    # checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
+    checkpointer = FSDPCheckpointer(
+        model,
+        cfg.train.output_dir,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        save_to_disk=True,
+    )
 
     # start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
     start_iter = 0
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
 
-    # periodic_checkpointer = PeriodicCheckpointer(
-    #     checkpointer,
-    #     period=3 * OFFICIAL_EPOCH_LENGTH,
-    #     max_iter=max_iter,
-    #     max_to_keep=3,
-    # )
+    periodic_checkpointer = PeriodicCheckpointer(
+        checkpointer,
+        period=3 * OFFICIAL_EPOCH_LENGTH,
+        max_iter=max_iter,
+        max_to_keep=3,
+    )
 
     # setup data preprocessing
 
@@ -271,7 +273,7 @@ def do_train(cfg, model, resume=False):
         batch_size=cfg.train.batch_size_per_gpu,
         num_workers=cfg.train.num_workers,
         shuffle=True,
-        seed=start_iter,  # TODO: Fix this -- cfg.train.seed
+        seed=cfg.train.seed,
         sampler_type=sampler_type,
         sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
         drop_last=True,
@@ -307,6 +309,20 @@ def do_train(cfg, model, resume=False):
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
     header = "Training"
+
+    num_classes = cfg.student.num_classes
+    # Initialize training metrics for each epoch
+    train_metrics = {
+        "mIoU": build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda(),
+        "pixel_accuracy": build_metric(
+            MetricType.MEAN_ACCURACY, num_classes=num_classes
+        ).cuda(),
+        # Add other relevant metrics here if needed, e.g., per_class_accuracy
+    }
+
+    # Store predictions and targets for epoch-wise metric calculation
+    epoch_preds = []
+    epoch_targets = []
 
     for data in metric_logger.log_every(
         data_loader,
@@ -368,17 +384,59 @@ def do_train(cfg, model, resume=False):
 
         # checkpointing and testing
 
+        with torch.no_grad():
+            logits = model.student.backbone(
+                data["image"].cuda(non_blocking=True),
+                data["points"].cuda(non_blocking=True),
+            )
+            outputs = model.student.dino_head(logits)
+            targets = data["label"].cuda(non_blocking=True)
+
+            epoch_preds.append(
+                outputs.argmax(dim=1).cpu()
+            )  # Assuming segmentation, take argmax
+            epoch_targets.append(targets.cpu())
+
+        if (iteration + 1) % OFFICIAL_EPOCH_LENGTH == 0:
+            logger.info(
+                f"Calculating training metrics for epoch {(iteration + 1) // OFFICIAL_EPOCH_LENGTH}"
+            )
+
+            # Concatenate all predictions and targets for the epoch
+            all_preds = torch.cat(epoch_preds).reshape(-1)
+            all_targets = torch.cat(epoch_targets).reshape(-1)
+
+            # Update and compute metrics
+            for metric_name, metric_obj in train_metrics.items():
+                metric_obj.update(preds=all_preds, target=all_targets)
+                results = metric_obj.compute()
+                metric_logger.update(
+                    **{
+                        f"train_{metric_name}": (
+                            results["mean_iou"]
+                            if "mean_iou" in results
+                            else results["top-1"]
+                        )
+                    }
+                )  # Adjust key based on metric output
+                metric_obj.reset()  # Reset for the next epoch
+
+            # Clear epoch data
+            epoch_preds = []
+            epoch_targets = []
+
+            metric_logger.synchronize_between_processes()
+            logger.info(f"Training Epoch Metrics: {metric_logger}")
+
         if (
             cfg.evaluation.eval_period_iterations > 0
             and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
         ):
             do_test(cfg, model, val_data_loader, f"training_{iteration}")
             if distributed.is_main_process():
-                torch.save(optimizer.state_dict(), "./optimizer.pth")
-                torch.save(scheduler.state_dict(), "./scheduler.pth")
+                periodic_checkpointer.step(iteration)
             torch.cuda.synchronize()
             model.train()
-        # periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1
     metric_logger.synchronize_between_processes()
