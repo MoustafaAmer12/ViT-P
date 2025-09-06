@@ -8,7 +8,7 @@ student:
   num_points: 250
   num_classes: 19
   # pretrained_weights: './checkpoint.pth'
-  pretrained_weights: './dinov2/weights/dinov2_vitb14_pretrain.pth'
+  pretrained_weights: '/kaggle/input/dinov2/pytorch/base/1/dinov2_vitb14_pretrain.pth'
 optim:
   epochs: 20
   # warmup_epochs: 1
