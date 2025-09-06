@@ -23,7 +23,7 @@ train:
   output_dir: .
   saveckp_freq: 2
   seed: 0
-  num_workers: 8
+  num_workers: 4
   OFFICIAL_EPOCH_LENGTH: 1250
   cache_dataset: true
 student:
