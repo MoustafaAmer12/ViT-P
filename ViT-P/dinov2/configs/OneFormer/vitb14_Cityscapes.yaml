@@ -1,7 +1,7 @@
 train:
-  batch_size_per_gpu: 4
+  batch_size_per_gpu: 8
   dataset_path: "Cityscapes"
-  OFFICIAL_EPOCH_LENGTH: 744
+  OFFICIAL_EPOCH_LENGTH: 372
 student:
   arch: vit_base
   patch_size: 14
