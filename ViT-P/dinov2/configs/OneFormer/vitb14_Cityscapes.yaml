@@ -1,16 +1,16 @@
 train:
-  batch_size_per_gpu: 20
+  batch_size_per_gpu: 2
   dataset_path: "Cityscapes"
-  OFFICIAL_EPOCH_LENGTH: 345
+  OFFICIAL_EPOCH_LENGTH: 1488
 student:
   arch: vit_base
   patch_size: 14
   num_points: 250
   num_classes: 19
   # pretrained_weights: './checkpoint.pth'
-  pretrained_weights: './dinov2_vitb14_pretrain.pth'
+  pretrained_weights: './dinov2/weights/dinov2_vitb14_pretrain.pth'
 optim:
-  epochs: 60
+  epochs: 20
   # warmup_epochs: 1
   warmup_epochs: 0
   lr: 1e-2

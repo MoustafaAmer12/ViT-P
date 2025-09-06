@@ -1,8 +1,13 @@
-torch==2.4.1
-torchvision==0.19.1
+torch==2.3.1
+torchvision==0.18.1
 omegaconf
 torchmetrics==1.6.0
 fvcore
 iopath
 xformers==0.0.27
 submitit==1.5.2
+pandas
+numpy
+opencv-python
+albumentations
+# triton

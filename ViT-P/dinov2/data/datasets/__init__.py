@@ -5,7 +5,7 @@
 
 from .image_net import ImageNet
 from .image_net_22k import ImageNet22k
-from .SA_1B import SA_1B
+
 from .COCO_stuff_P import COCO_stuff_P
 from .Objects365_P import Objects365_P
 from .ADE20k_P import ADE20k_P

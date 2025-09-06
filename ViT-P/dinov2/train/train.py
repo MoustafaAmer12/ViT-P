@@ -24,19 +24,25 @@ from dinov2.train.ssl_meta_arch import SSLMetaArch
 
 from dinov2.eval.metrics import MetricType, build_metric
 
-torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
+torch.backends.cuda.matmul.allow_tf32 = (
+    True  # PyTorch 1.12 sets this to False by default
+)
 logger = logging.getLogger("dinov2")
 
 
 def get_args_parser(add_help: bool = True):
     parser = argparse.ArgumentParser("ViT-P training", add_help=add_help)
-    parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
+    parser.add_argument(
+        "--config-file", default="", metavar="FILE", help="path to config file"
+    )
     parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Whether to not attempt to resume from the checkpoint directory. ",
     )
-    parser.add_argument("--eval-only", action="store_true", help="perform evaluation only")
+    parser.add_argument(
+        "--eval-only", action="store_true", help="perform evaluation only"
+    )
     parser.add_argument("--eval", type=str, default="", help="Eval type to perform")
     parser.add_argument(
         "opts",
@@ -60,7 +66,9 @@ For python-based LazyConfig, use "path.key=value".
 
 
 def build_optimizer(cfg, params_groups):
-    return torch.optim.AdamW(params_groups, betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2))
+    return torch.optim.AdamW(
+        params_groups, betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2)
+    )
 
 
 def build_schedulers(cfg):
@@ -131,34 +139,39 @@ def do_test(cfg, model, data_loader, iteration):
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Evaluation:"
-    
+
     for data in metric_logger.log_every(data_loader, 100, header):
-        
-        logits = model.student.backbone(data['image'].cuda(non_blocking=True), data['points'].cuda(non_blocking=True))
+
+        logits = model.student.backbone(
+            data["image"].cuda(non_blocking=True),
+            data["points"].cuda(non_blocking=True),
+        )
         outputs = model.student.dino_head(logits)
-        targets = data['label'].cuda(non_blocking=True)
+        targets = data["label"].cuda(non_blocking=True)
 
         metric_inputs = {
-            "preds": outputs.reshape(-1,num_classes),
+            "preds": outputs.reshape(-1, num_classes),
             "target": targets.reshape(-1),
         }
         metric.update(**metric_inputs)
 
     metric_logger.synchronize_between_processes()
     logger.info(f"Averaged stats: {metric_logger}")
-    
+
     results_dict_temp = metric.compute()
-    metric_logger_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    metric_logger_stats = {
+        k: meter.global_avg for k, meter in metric_logger.meters.items()
+    }
 
     logger.info("")
-    
+
     max_accuracy = 0
     top1_accuracy = results_dict_temp["top-1"]
     top5_accuracy = results_dict_temp["top-5"]
-    
+
     if top1_accuracy > max_accuracy:
         max_accuracy = top1_accuracy
-        
+
     logger.info(f"Top_1_accuracy: {top1_accuracy}")
     logger.info(f"Top_5_accuracy: {top5_accuracy}")
     # logger.info(f"max_accuracy: {max_accuracy}")
@@ -171,7 +184,7 @@ def do_test(cfg, model, data_loader, iteration):
         # os.makedirs(eval_dir, exist_ok=True)
         # # save teacher checkpoint
         # ckp_path = os.path.join(eval_dir, "teacher_checkpoint.pth")
-        ckp_path =  "./checkpoint.pth"
+        ckp_path = "./checkpoint.pth"
         torch.save(new_state_dict, ckp_path)
 
 
@@ -183,23 +196,35 @@ def do_train(cfg, model, resume=False):
     # setup optimizer
 
     # optimizer = build_optimizer(cfg, model.get_params_groups())
-    
 
     named_parameters = list(model.student["backbone"].named_parameters())
     # gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad and n != 'cls_embeddings.weight']
-    rest_params = [p for n, p in named_parameters if p.requires_grad and n != '_fsdp_wrapped_module.cls_embeddings.weight']
-    cls_embd = [p for n, p in named_parameters if p.requires_grad and n == '_fsdp_wrapped_module.cls_embeddings.weight']
+    rest_params = [
+        p
+        for n, p in named_parameters
+        if p.requires_grad and n != "_fsdp_wrapped_module.cls_embeddings.weight"
+    ]
+    cls_embd = [
+        p
+        for n, p in named_parameters
+        if p.requires_grad and n == "_fsdp_wrapped_module.cls_embeddings.weight"
+    ]
 
-    optimizer = torch.optim.SGD([   
-                        {"params": cls_embd, 'lr': 1e-2},
-                        {"params": rest_params},
-                        ],
-                        lr=cfg.optim.lr,
-                        momentum=0.9,
-                        weight_decay = cfg.optim.weight_decay)
+    optimizer = torch.optim.SGD(
+        [
+            {"params": cls_embd, "lr": 1e-2},
+            {"params": rest_params},
+        ],
+        lr=cfg.optim.lr,
+        momentum=0.9,
+        weight_decay=cfg.optim.weight_decay,
+    )
 
-
-    scheduler = WarmupCosineSchedule(optimizer, warmup_steps=(cfg.optim.warmup_epochs * cfg.train.OFFICIAL_EPOCH_LENGTH), t_total=(cfg.optim["epochs"] * cfg.train.OFFICIAL_EPOCH_LENGTH))   
+    scheduler = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=(cfg.optim.warmup_epochs * cfg.train.OFFICIAL_EPOCH_LENGTH),
+        t_total=(cfg.optim["epochs"] * cfg.train.OFFICIAL_EPOCH_LENGTH),
+    )
 
     # optimizer.load_state_dict(torch.load("./optimizer.pth"))
     # scheduler.load_state_dict(torch.load("./scheduler.pth"))
@@ -230,7 +255,6 @@ def do_train(cfg, model, resume=False):
 
     img_size = cfg.crops.global_crops_size
 
-
     # setup data loader
 
     dataset = make_dataset(
@@ -255,7 +279,6 @@ def do_train(cfg, model, resume=False):
         persistent_workers=False,
     )
 
-
     val_dataset = make_dataset(
         dataset_str=cfg.train.dataset_path,
         split="val",
@@ -276,7 +299,6 @@ def do_train(cfg, model, resume=False):
         persistent_workers=False,
     )
 
-
     # training loop
 
     iteration = start_iter
@@ -285,7 +307,7 @@ def do_train(cfg, model, resume=False):
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
     header = "Training"
-    
+
     for data in metric_logger.log_every(
         data_loader,
         100,
@@ -293,10 +315,9 @@ def do_train(cfg, model, resume=False):
         max_iter,
         start_iter,
     ):
-        current_batch_size = data['image'].shape[0] 
+        current_batch_size = data["image"].shape[0]
         if iteration > max_iter:
             return
-            
 
         # apply schedules
 
@@ -328,13 +349,14 @@ def do_train(cfg, model, resume=False):
         scheduler.step()
         # perform teacher EMA update
 
-
         # logging
 
         if distributed.get_global_size() > 1:
             for v in loss_dict.values():
                 torch.distributed.all_reduce(v)
-        loss_dict_reduced = {k: v.item() / distributed.get_global_size() for k, v in loss_dict.items()}
+        loss_dict_reduced = {
+            k: v.item() / distributed.get_global_size() for k, v in loss_dict.items()
+        }
 
         if math.isnan(sum(loss_dict_reduced.values())):
             logger.info("NaN detected")
@@ -346,7 +368,10 @@ def do_train(cfg, model, resume=False):
 
         # checkpointing and testing
 
-        if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
+        if (
+            cfg.evaluation.eval_period_iterations > 0
+            and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
+        ):
             do_test(cfg, model, val_data_loader, f"training_{iteration}")
             if distributed.is_main_process():
                 torch.save(optimizer.state_dict(), "./optimizer.pth")
@@ -377,6 +402,7 @@ def main(args):
         )
         return do_test(cfg, model, val_data_loader, f"training_{iteration}")
 
+    logger.info("Start training")
     do_train(cfg, model, resume=not args.no_resume)
 
 

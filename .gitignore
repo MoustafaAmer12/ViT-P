@@ -66,3 +66,7 @@ upload.py
 
 
 *Zone.Identifier
+
+cityscapes/
+venv/
+tmp_run/

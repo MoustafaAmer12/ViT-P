@@ -21,9 +21,9 @@ train:
   batch_size_per_gpu: 32
   dataset_path: "COOC_stuff_164K" 
   output_dir: .
-  saveckp_freq: 20
+  saveckp_freq: 2
   seed: 0
-  num_workers: 32
+  num_workers: 8
   OFFICIAL_EPOCH_LENGTH: 1250
   cache_dataset: true
 student:
