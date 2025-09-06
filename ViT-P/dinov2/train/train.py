@@ -138,7 +138,7 @@ def do_test(cfg, model, data_loader, iteration):
     # Initialize evaluation metrics
     eval_mIoU = build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda()
     eval_pixel_accuracy = build_metric(
-        MetricType.MEAN_ACCURACY, num_classes=num_classes
+        MetricType.MEAN_ACCURACY, num_classes=num_classes, ks=(1, 5)
     ).cuda()
     # Add other CityScapes specific metrics here if needed, e.g., PER_CLASS_ACCURACY
 
@@ -158,8 +158,8 @@ def do_test(cfg, model, data_loader, iteration):
         targets_flat = targets.reshape(-1)
 
         # Update mIoU and pixel accuracy
-        eval_mIoU.update(preds=preds_flat, target=targets_flat)
-        eval_pixel_accuracy.update(preds=preds_flat, target=targets_flat)
+        eval_mIoU.update(outputs, target=targets_flat)
+        eval_pixel_accuracy.update(preds_flat, target=targets_flat)
 
     metric_logger.synchronize_between_processes()
     logger.info(f"Averaged stats: {metric_logger}")
@@ -168,21 +168,22 @@ def do_test(cfg, model, data_loader, iteration):
     mIoU_results = eval_mIoU.compute()
     pixel_accuracy_results = eval_pixel_accuracy.compute()
 
-    logger.info(f"Validation Mean IoU: {mIoU_results.get('mean_iou', 'N/A')}")
+    current_mIoU = mIoU_results.item()
+
+    logger.info(f"Validation Mean IoU: {current_mIoU:.4f}")
     logger.info(
-        f"Validation Pixel Accuracy: {pixel_accuracy_results.get('top-1', 'N/A')}"
+        f"Validation Pixel Accuracy (Top-1): {pixel_accuracy_results['top-1'].item():.4f}"
     )
-    # Log other computed metrics as needed
+    logger.info(
+        f"Validation Pixel Accuracy (Top-5): {pixel_accuracy_results['top-5'].item():.4f}"
+    )
 
     # You can also update the metric_logger with these computed values
-    metric_logger.update(val_mIoU=mIoU_results.get("mean_iou", 0.0))
-    metric_logger.update(val_pixel_accuracy=pixel_accuracy_results.get("top-1", 0.0))
+    metric_logger.update(val_mIoU=current_mIoU)
+    metric_logger.update(val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item())
+    metric_logger.update(val_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item())
 
-    new_state_dict = model.student["backbone"].state_dict()
-
-    if distributed.is_main_process():
-        ckp_path = "./checkpoint.pth"
-        torch.save(new_state_dict, ckp_path)
+    return current_mIoU
 
 
 def do_train(cfg, model, resume=False):
@@ -315,14 +316,19 @@ def do_train(cfg, model, resume=False):
     train_metrics = {
         "mIoU": build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda(),
         "pixel_accuracy": build_metric(
-            MetricType.MEAN_ACCURACY, num_classes=num_classes
+            MetricType.MEAN_ACCURACY, num_classes=num_classes, ks=(1, 5)
         ).cuda(),
         # Add other relevant metrics here if needed, e.g., per_class_accuracy
     }
 
     # Store predictions and targets for epoch-wise metric calculation
-    epoch_preds = []
+    epoch_preds_logits = []
+    epoch_preds_argmax = []
     epoch_targets = []
+
+    best_mIoU = -1.0
+    patience_counter = 0
+    early_stopping_patience = cfg.train.early_stopping_patience
 
     for data in metric_logger.log_every(
         data_loader,
@@ -392,9 +398,8 @@ def do_train(cfg, model, resume=False):
             outputs = model.student.dino_head(logits)
             targets = data["label"].cuda(non_blocking=True)
 
-            epoch_preds.append(
-                outputs.argmax(dim=1).cpu()
-            )  # Assuming segmentation, take argmax
+            epoch_preds_logits.append(outputs.cpu())
+            epoch_preds_argmax.append(outputs.argmax(dim=1).cpu())
             epoch_targets.append(targets.cpu())
 
         if (iteration + 1) % OFFICIAL_EPOCH_LENGTH == 0:
@@ -403,26 +408,28 @@ def do_train(cfg, model, resume=False):
             )
 
             # Concatenate all predictions and targets for the epoch
-            all_preds = torch.cat(epoch_preds).reshape(-1)
+            all_preds_logits = torch.cat(epoch_preds_logits).reshape(-1, num_classes)
+            all_preds_argmax = torch.cat(epoch_preds_argmax).reshape(-1)
             all_targets = torch.cat(epoch_targets).reshape(-1)
 
-            # Update and compute metrics
-            for metric_name, metric_obj in train_metrics.items():
-                metric_obj.update(preds=all_preds, target=all_targets)
-                results = metric_obj.compute()
-                metric_logger.update(
-                    **{
-                        f"train_{metric_name}": (
-                            results["mean_iou"]
-                            if "mean_iou" in results
-                            else results["top-1"]
-                        )
-                    }
-                )  # Adjust key based on metric output
-                metric_obj.reset()  # Reset for the next epoch
+            train_metrics["mIoU"].update(all_preds_argmax, all_targets)
+            mIoU_results = train_metrics["mIoU"].compute()
+            metric_logger.update(train_mIoU=mIoU_results.item())
+            train_metrics["mIoU"].reset()
 
-            # Clear epoch data
-            epoch_preds = []
+            # Update and compute pixel accuracy (top-1 and top-5)
+            train_metrics["pixel_accuracy"].update(all_preds_logits, all_targets)
+            pixel_accuracy_results = train_metrics["pixel_accuracy"].compute()
+            metric_logger.update(
+                train_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item()
+            )
+            metric_logger.update(
+                train_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item()
+            )
+            train_metrics["pixel_accuracy"].reset()
+
+            epoch_preds_logits = []
+            epoch_preds_argmax = []
             epoch_targets = []
 
             metric_logger.synchronize_between_processes()
@@ -432,13 +439,48 @@ def do_train(cfg, model, resume=False):
             cfg.evaluation.eval_period_iterations > 0
             and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
         ):
-            do_test(cfg, model, val_data_loader, f"training_{iteration}")
+            current_mIoU = do_test(cfg, model, val_data_loader, f"training_{iteration}")
+
             if distributed.is_main_process():
+                if current_mIoU > best_mIoU:
+                    logger.info(
+                        f"Validation mIoU improved from {best_mIoU:.4f} to {current_mIoU:.4f}. Saving best model."
+                    )
+                    best_mIoU = current_mIoU
+                    patience_counter = 0
+                    best_ckp_path = os.path.join(cfg.train.output_dir, "best_model.pth")
+                    torch.save(model.student["backbone"].state_dict(), best_ckp_path)
+                else:
+                    patience_counter += 1
+                    logger.info(
+                        f"Validation mIoU did not improve. Patience: {patience_counter}/{early_stopping_patience}"
+                    )
+
+                    if patience_counter >= early_stopping_patience:
+                        logger.info(
+                            f"Early stopping triggered after {patience_counter} evaluations without improvement."
+                        )
+                        latest_ckp_path = os.path.join(
+                            cfg.train.output_dir, "latest_model.pth"
+                        )
+                        torch.save(
+                            model.student["backbone"].state_dict(), latest_ckp_path
+                        )
+                        break
+
+            if distributed.is_main_process():
+                checkpointer.save("latest")
                 periodic_checkpointer.step(iteration)
+
             torch.cuda.synchronize()
             model.train()
 
         iteration = iteration + 1
+
+    if distributed.is_main_process():
+        final_ckp_path = os.path.join(cfg.train.output_dir, "final_model.pth")
+        torch.save(model.student["backbone"].state_dict(), final_ckp_path)
+
     metric_logger.synchronize_between_processes()
     torch.distributed.destroy_process_group()
     return 0
