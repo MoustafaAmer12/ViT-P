@@ -60,7 +60,7 @@ def build_metric(
         )
     elif metric_type == MetricType.MEAN_IOU:  # Add a handler for MEAN_IOU
         return MulticlassJaccardIndex(
-            num_classes=num_classes, average="macro", ignore_index=-1
+            num_classes=num_classes, average="macro", ignore_index=255
         )  # "macro" for mIoU
 
     raise ValueError(f"Unknown metric type {metric_type}")

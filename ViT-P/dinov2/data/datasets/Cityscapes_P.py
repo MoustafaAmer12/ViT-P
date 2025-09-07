@@ -106,7 +106,7 @@ class Cityscapes_P(Dataset):
             31: 16,
             32: 17,
             33: 18,
-            -1: -1,
+            -1: 255,
         }
 
     def __len__(self):

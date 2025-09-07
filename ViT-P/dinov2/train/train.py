@@ -181,9 +181,8 @@ def do_test(
     )
 
     # Update the separate validation logger
-    metric_logger_val.update(
-        val_iteration=iteration_tag
-    )  # Add iteration tag for context
+    logger.info(f"Validation performed at iteration: {iteration_tag}")
+
     metric_logger_val.update(val_mIoU=current_mIoU)
     metric_logger_val.update(
         val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item()
