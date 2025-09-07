@@ -358,9 +358,9 @@ def do_train(cfg, model, resume=False):
             outputs = model.student.dino_head(logits)
             targets = data["label"].cuda(non_blocking=True)
 
-            epoch_preds_logits.append(outputs.cpu())
-            epoch_preds_argmax.append(outputs.argmax(dim=1).cpu())
-            epoch_targets.append(targets.cpu())
+            epoch_preds_logits.append(outputs)
+            epoch_preds_argmax.append(outputs.argmax(dim=1))
+            epoch_targets.append(targets)
 
         if (iteration + 1) % OFFICIAL_EPOCH_LENGTH == 0:
             logger.info(
