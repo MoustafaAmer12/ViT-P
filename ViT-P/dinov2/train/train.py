@@ -332,7 +332,7 @@ def do_train(cfg, model, resume=False):
 
     for data in metric_logger.log_every(
         data_loader,
-        100,
+        372,
         header,
         max_iter,
         start_iter,
