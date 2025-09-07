@@ -1,8 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the Apache License, Version 2.0
-# found in the LICENSE file in the root directory of this source tree.
-
 import argparse
 import logging
 import math
@@ -35,7 +30,7 @@ def get_args_parser(add_help: bool = True):
     parser.add_argument(
         "--config-file", default="", metavar="FILE", help="path to config file"
     )
-    parser.add_argument(
+    parser.add_argumen(
         "--no-resume",
         action="store_true",
         help="Whether to not attempt to resume from the checkpoint directory. ",
@@ -137,10 +132,10 @@ def do_test(cfg, model, data_loader, iteration):
 
     # Initialize evaluation metrics
     eval_mIoU = build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda()
+    # Build pixel accuracy with top-1 and top-5
     eval_pixel_accuracy = build_metric(
         MetricType.MEAN_ACCURACY, num_classes=num_classes, ks=(1, 5)
     ).cuda()
-    # Add other CityScapes specific metrics here if needed, e.g., PER_CLASS_ACCURACY
 
     metric_logger = MetricLogger(delimiter="  ")
     header = "Evaluation:"
@@ -153,18 +148,15 @@ def do_test(cfg, model, data_loader, iteration):
         outputs = model.student.dino_head(logits)
         targets = data["label"].cuda(non_blocking=True)
 
-        # Reshape outputs and targets for segmentation metrics
-        preds_flat = outputs.argmax(dim=1).reshape(-1)  # Take argmax for predictions
+        preds_flat = outputs.argmax(dim=1).reshape(-1)
         targets_flat = targets.reshape(-1)
 
-        # Update mIoU and pixel accuracy
-        eval_mIoU.update(outputs, target=targets_flat)
-        eval_pixel_accuracy.update(preds_flat, target=targets_flat)
+        eval_pixel_accuracy.update(outputs, targets_flat)
+        eval_mIoU.update(preds_flat, targets_flat)
 
     metric_logger.synchronize_between_processes()
     logger.info(f"Averaged stats: {metric_logger}")
 
-    # Compute and log summarized evaluation metrics
     mIoU_results = eval_mIoU.compute()
     pixel_accuracy_results = eval_pixel_accuracy.compute()
 
@@ -178,7 +170,6 @@ def do_test(cfg, model, data_loader, iteration):
         f"Validation Pixel Accuracy (Top-5): {pixel_accuracy_results['top-5'].item():.4f}"
     )
 
-    # You can also update the metric_logger with these computed values
     metric_logger.update(val_mIoU=current_mIoU)
     metric_logger.update(val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item())
     metric_logger.update(val_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item())
@@ -189,13 +180,9 @@ def do_test(cfg, model, data_loader, iteration):
 def do_train(cfg, model, resume=False):
     model.train()
     inputs_dtype = torch.half
-    fp16_scaler = model.fp16_scaler  # for mixed precision training
-
-    # setup optimizer
-    # optimizer = build_optimizer(cfg, model.get_params_groups())
+    fp16_scaler = model.fp16_scaler
 
     named_parameters = list(model.student["backbone"].named_parameters())
-    # gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad and n != 'cls_embeddings.weight']
     rest_params = [
         p
         for n, p in named_parameters
@@ -223,17 +210,6 @@ def do_train(cfg, model, resume=False):
         t_total=(cfg.optim["epochs"] * cfg.train.OFFICIAL_EPOCH_LENGTH),
     )
 
-    # optimizer.load_state_dict(torch.load("./optimizer.pth"))
-    # scheduler.load_state_dict(torch.load("./scheduler.pth"))
-    # (
-    #     lr_schedule,
-    #     wd_schedule,
-    #     momentum_schedule,
-    #     teacher_temp_schedule,
-    #     last_layer_lr_schedule,
-    # ) = build_schedulers(cfg)
-
-    # checkpointer
     checkpointer = FSDPCheckpointer(
         model,
         cfg.train.output_dir,
@@ -242,8 +218,20 @@ def do_train(cfg, model, resume=False):
         save_to_disk=True,
     )
 
-    # start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
     start_iter = 0
+    # Attempt to load from 'latest' checkpoint if resume is True and a checkpoint exists
+    if resume and os.path.exists(os.path.join(cfg.train.output_dir, "latest.pth")):
+        checkpoint_data = checkpointer.resume_or_load(
+            "", resume=True
+        )  # Pass empty string for path, it will look for latest
+        start_iter = checkpoint_data.get("iteration", -1) + 1
+        logger.info(f"Resuming training from iteration {start_iter}")
+    elif (
+        cfg.MODEL.WEIGHTS and not resume
+    ):  # Initial load if specified, without resuming optimizer/scheduler state
+        checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=False)
+        logger.info(f"Loading initial weights from {cfg.MODEL.WEIGHTS}")
+
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
 
@@ -254,11 +242,7 @@ def do_train(cfg, model, resume=False):
         max_to_keep=3,
     )
 
-    # setup data preprocessing
-
     img_size = cfg.crops.global_crops_size
-
-    # setup data loader
 
     dataset = make_dataset(
         dataset_str=cfg.train.dataset_path,
@@ -267,7 +251,6 @@ def do_train(cfg, model, resume=False):
         n_points=cfg.student.num_points,
     )
 
-    # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.SHARDED_INFINITE
     data_loader = make_data_loader(
         dataset=dataset,
@@ -276,7 +259,7 @@ def do_train(cfg, model, resume=False):
         shuffle=True,
         seed=cfg.train.seed,
         sampler_type=sampler_type,
-        sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
+        sampler_advance=0,
         drop_last=True,
         collate_fn=None,
         persistent_workers=False,
@@ -289,7 +272,6 @@ def do_train(cfg, model, resume=False):
         n_points=cfg.student.num_points,
     )
 
-    # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.DISTRIBUTED
     val_data_loader = make_data_loader(
         dataset=val_dataset,
@@ -302,8 +284,6 @@ def do_train(cfg, model, resume=False):
         persistent_workers=False,
     )
 
-    # training loop
-
     iteration = start_iter
 
     logger.info("Starting training from iteration {}".format(start_iter))
@@ -312,23 +292,20 @@ def do_train(cfg, model, resume=False):
     header = "Training"
 
     num_classes = cfg.student.num_classes
-    # Initialize training metrics for each epoch
     train_metrics = {
         "mIoU": build_metric(MetricType.MEAN_IOU, num_classes=num_classes).cuda(),
         "pixel_accuracy": build_metric(
             MetricType.MEAN_ACCURACY, num_classes=num_classes, ks=(1, 5)
         ).cuda(),
-        # Add other relevant metrics here if needed, e.g., per_class_accuracy
     }
 
-    # Store predictions and targets for epoch-wise metric calculation
     epoch_preds_logits = []
     epoch_preds_argmax = []
     epoch_targets = []
 
     best_mIoU = -1.0
     patience_counter = 0
-    early_stopping_patience = cfg.train.early_stopping_patience
+    early_stopping_patience = getattr(cfg.train, "early_stopping_patience", 10)
 
     for data in metric_logger.log_every(
         data_loader,
@@ -339,22 +316,10 @@ def do_train(cfg, model, resume=False):
     ):
         current_batch_size = data["image"].shape[0]
         if iteration > max_iter:
-            return
-
-        # apply schedules
-
-        # lr = lr_schedule[iteration]
-        # wd = wd_schedule[iteration]
-        # mom = momentum_schedule[iteration]
-        # last_layer_lr = last_layer_lr_schedule[iteration]
-        # apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
-
-        # compute lossess
+            break
 
         optimizer.zero_grad(set_to_none=True)
         loss_dict = model.forward_backward(data)
-
-        # clip gradients
 
         if fp16_scaler is not None:
             if cfg.optim.clip_grad:
@@ -369,9 +334,6 @@ def do_train(cfg, model, resume=False):
                     v.clip_grad_norm_(cfg.optim.clip_grad)
             optimizer.step()
         scheduler.step()
-        # perform teacher EMA update
-
-        # logging
 
         if distributed.get_global_size() > 1:
             for v in loss_dict.values():
@@ -387,8 +349,6 @@ def do_train(cfg, model, resume=False):
 
         metric_logger.update(current_batch_size=current_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
-
-        # checkpointing and testing
 
         with torch.no_grad():
             logits = model.student.backbone(
@@ -407,7 +367,6 @@ def do_train(cfg, model, resume=False):
                 f"Calculating training metrics for epoch {(iteration + 1) // OFFICIAL_EPOCH_LENGTH}"
             )
 
-            # Concatenate all predictions and targets for the epoch
             all_preds_logits = torch.cat(epoch_preds_logits).reshape(-1, num_classes)
             all_preds_argmax = torch.cat(epoch_preds_argmax).reshape(-1)
             all_targets = torch.cat(epoch_targets).reshape(-1)
@@ -417,7 +376,6 @@ def do_train(cfg, model, resume=False):
             metric_logger.update(train_mIoU=mIoU_results.item())
             train_metrics["mIoU"].reset()
 
-            # Update and compute pixel accuracy (top-1 and top-5)
             train_metrics["pixel_accuracy"].update(all_preds_logits, all_targets)
             pixel_accuracy_results = train_metrics["pixel_accuracy"].compute()
             metric_logger.update(
@@ -442,6 +400,16 @@ def do_train(cfg, model, resume=False):
             current_mIoU = do_test(cfg, model, val_data_loader, f"training_{iteration}")
 
             if distributed.is_main_process():
+                # Define a common state dictionary for saving
+                checkpoint_state = {
+                    "iteration": iteration,
+                    "model_state_dict": model.student["backbone"].state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "best_mIoU": best_mIoU,  # Also save best_mIoU to reload if needed
+                    "patience_counter": patience_counter,  # And patience
+                }
+
                 if current_mIoU > best_mIoU:
                     logger.info(
                         f"Validation mIoU improved from {best_mIoU:.4f} to {current_mIoU:.4f}. Saving best model."
@@ -449,13 +417,12 @@ def do_train(cfg, model, resume=False):
                     best_mIoU = current_mIoU
                     patience_counter = 0
                     best_ckp_path = os.path.join(cfg.train.output_dir, "best_model.pth")
-                    torch.save(model.student["backbone"].state_dict(), best_ckp_path)
+                    torch.save(checkpoint_state, best_ckp_path)  # Save full state
                 else:
                     patience_counter += 1
                     logger.info(
                         f"Validation mIoU did not improve. Patience: {patience_counter}/{early_stopping_patience}"
                     )
-
                     if patience_counter >= early_stopping_patience:
                         logger.info(
                             f"Early stopping triggered after {patience_counter} evaluations without improvement."
@@ -463,23 +430,30 @@ def do_train(cfg, model, resume=False):
                         latest_ckp_path = os.path.join(
                             cfg.train.output_dir, "latest_model.pth"
                         )
-                        torch.save(
-                            model.student["backbone"].state_dict(), latest_ckp_path
-                        )
+                        torch.save(checkpoint_state, latest_ckp_path)  # Save full state
                         break
 
             if distributed.is_main_process():
+                # The FSDPCheckpointer already saves model, optimizer, scheduler for 'latest'
                 checkpointer.save("latest")
                 periodic_checkpointer.step(iteration)
-
             torch.cuda.synchronize()
             model.train()
 
         iteration = iteration + 1
 
     if distributed.is_main_process():
+        # Final checkpoint with full state
+        checkpoint_state = {
+            "iteration": iteration,
+            "model_state_dict": model.student["backbone"].state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "best_mIoU": best_mIoU,
+            "patience_counter": patience_counter,
+        }
         final_ckp_path = os.path.join(cfg.train.output_dir, "final_model.pth")
-        torch.save(model.student["backbone"].state_dict(), final_ckp_path)
+        torch.save(checkpoint_state, final_ckp_path)
 
     metric_logger.synchronize_between_processes()
     torch.distributed.destroy_process_group()
@@ -500,7 +474,8 @@ def main(args):
             .get("iteration", -1)
             + 1
         )
-        return do_test(cfg, model, val_data_loader, f"training_{iteration}")
+        do_test(cfg, model, val_data_loader, f"training_{iteration}")
+        return
 
     logger.info("Start training")
     do_train(cfg, model, resume=not args.no_resume)
