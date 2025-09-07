@@ -2,7 +2,7 @@ train:
   batch_size_per_gpu: 8
   dataset_path: "Cityscapes"
   OFFICIAL_EPOCH_LENGTH: 372
-  early_stopping_patience: 10
+  early_stopping_patience: 5
 student:
   arch: vit_base
   patch_size: 14
@@ -11,11 +11,11 @@ student:
   # pretrained_weights: './checkpoint.pth'
   pretrained_weights: '/kaggle/input/dinov2/pytorch/base/1/dinov2_vitb14_pretrain.pth'
 optim:
-  epochs: 30
+  epochs: 40
   # warmup_epochs: 1
   warmup_epochs: 0
   lr: 1e-2
 crops:
   global_crops_size: [518, 1036]
 evaluation:
-  eval_period_iterations: 1116
+  eval_period_iterations: 372

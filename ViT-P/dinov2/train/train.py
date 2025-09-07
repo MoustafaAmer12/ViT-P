@@ -124,7 +124,9 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
 
 
 @torch.inference_mode()
-def do_test(cfg, model, data_loader, iteration):
+def do_test(
+    cfg, model, data_loader, iteration_tag, metric_logger_training=None
+):  # Added metric_logger_training
     model.eval()
     logger.info("running validation !")
 
@@ -137,10 +139,18 @@ def do_test(cfg, model, data_loader, iteration):
         MetricType.MEAN_ACCURACY, num_classes=num_classes, ks=(1, 5)
     ).cuda()
 
-    metric_logger = MetricLogger(delimiter="  ")
+    # Create a separate MetricLogger for validation metrics
+    validation_metrics_file = os.path.join(
+        cfg.train.output_dir, "validation_metrics.json"
+    )
+    metric_logger_val = MetricLogger(
+        delimiter="  ", output_file=validation_metrics_file
+    )
     header = "Evaluation:"
 
-    for data in metric_logger.log_every(data_loader, 100, header):
+    for data in metric_logger_val.log_every(
+        data_loader, 100, header
+    ):  # Use metric_logger_val here
         logits = model.student.backbone(
             data["image"].cuda(non_blocking=True),
             data["points"].cuda(non_blocking=True),
@@ -154,8 +164,8 @@ def do_test(cfg, model, data_loader, iteration):
         eval_pixel_accuracy.update(outputs, targets_flat)
         eval_mIoU.update(preds_flat, targets_flat)
 
-    metric_logger.synchronize_between_processes()
-    logger.info(f"Averaged stats: {metric_logger}")
+    metric_logger_val.synchronize_between_processes()  # Synchronize validation logger
+    logger.info(f"Averaged stats: {metric_logger_val}")  # Log from validation logger
 
     mIoU_results = eval_mIoU.compute()
     pixel_accuracy_results = eval_pixel_accuracy.compute()
@@ -170,9 +180,27 @@ def do_test(cfg, model, data_loader, iteration):
         f"Validation Pixel Accuracy (Top-5): {pixel_accuracy_results['top-5'].item():.4f}"
     )
 
-    metric_logger.update(val_mIoU=current_mIoU)
-    metric_logger.update(val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item())
-    metric_logger.update(val_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item())
+    # Update the separate validation logger
+    metric_logger_val.update(
+        val_iteration=iteration_tag
+    )  # Add iteration tag for context
+    metric_logger_val.update(val_mIoU=current_mIoU)
+    metric_logger_val.update(
+        val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item()
+    )
+    metric_logger_val.update(
+        val_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item()
+    )
+
+    # Optionally, also update the training metric logger if you want these in both files
+    if metric_logger_training is not None:
+        metric_logger_training.update(val_mIoU=current_mIoU)
+        metric_logger_training.update(
+            val_pixel_accuracy_top1=pixel_accuracy_results["top-1"].item()
+        )
+        metric_logger_training.update(
+            val_pixel_accuracy_top5=pixel_accuracy_results["top-5"].item()
+        )
 
     return current_mIoU
 
@@ -281,7 +309,9 @@ def do_train(cfg, model, resume=False):
 
     logger.info("Starting training from iteration {}".format(start_iter))
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
-    metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
+    metric_logger = MetricLogger(
+        delimiter="  ", output_file=metrics_file
+    )  # This is the training logger
     header = "Training"
 
     num_classes = cfg.student.num_classes
@@ -390,7 +420,14 @@ def do_train(cfg, model, resume=False):
             cfg.evaluation.eval_period_iterations > 0
             and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
         ):
-            current_mIoU = do_test(cfg, model, val_data_loader, f"training_{iteration}")
+            # Pass the training metric_logger to do_test if you want to also log validation metrics in the training file
+            current_mIoU = do_test(
+                cfg,
+                model,
+                val_data_loader,
+                f"training_{iteration}",
+                metric_logger_training=metric_logger,
+            )
 
             if distributed.is_main_process():
                 # Define a common state dictionary for saving
@@ -445,13 +482,21 @@ def main(args):
 
     logger.info("Model:\n{}".format(model))
     if args.eval_only:
+        # For eval_only, we might want to ensure a validation_metrics.json is always created.
+        # We can pass a dummy (None) for metric_logger_training in this case.
         iteration = (
             FSDPCheckpointer(model, save_dir=cfg.train.output_dir)
             .resume_or_load(cfg.MODEL.WEIGHTS, resume=not args.no_resume)
             .get("iteration", -1)
             + 1
         )
-        do_test(cfg, model, val_data_loader, f"training_{iteration}")
+        do_test(
+            cfg,
+            model,
+            val_data_loader,
+            f"eval_only_{iteration}",
+            metric_logger_training=None,
+        )
         return
 
     logger.info("Start training")
