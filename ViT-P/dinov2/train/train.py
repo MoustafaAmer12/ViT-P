@@ -235,13 +235,6 @@ def do_train(cfg, model, resume=False):
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
 
-    periodic_checkpointer = PeriodicCheckpointer(
-        checkpointer,
-        period=3 * OFFICIAL_EPOCH_LENGTH,
-        max_iter=max_iter,
-        max_to_keep=3,
-    )
-
     img_size = cfg.crops.global_crops_size
 
     dataset = make_dataset(
@@ -416,44 +409,28 @@ def do_train(cfg, model, resume=False):
                     )
                     best_mIoU = current_mIoU
                     patience_counter = 0
-                    best_ckp_path = os.path.join(cfg.train.output_dir, "best_model.pth")
-                    torch.save(checkpoint_state, best_ckp_path)  # Save full state
+                    checkpointer.save("best")
                 else:
                     patience_counter += 1
                     logger.info(
                         f"Validation mIoU did not improve. Patience: {patience_counter}/{early_stopping_patience}"
                     )
+                    logger.info(f"Best Validation mIoU remains {best_mIoU:.4f}.")
+                    checkpointer.save("latest")
+
                     if patience_counter >= early_stopping_patience:
                         logger.info(
                             f"Early stopping triggered after {patience_counter} evaluations without improvement."
                         )
-                        latest_ckp_path = os.path.join(
-                            cfg.train.output_dir, "latest_model.pth"
-                        )
-                        torch.save(checkpoint_state, latest_ckp_path)  # Save full state
                         break
 
-            if distributed.is_main_process():
-                # The FSDPCheckpointer already saves model, optimizer, scheduler for 'latest'
-                checkpointer.save("latest")
-                periodic_checkpointer.step(iteration)
             torch.cuda.synchronize()
             model.train()
 
         iteration = iteration + 1
 
     if distributed.is_main_process():
-        # Final checkpoint with full state
-        checkpoint_state = {
-            "iteration": iteration,
-            "model_state_dict": model.student["backbone"].state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_mIoU": best_mIoU,
-            "patience_counter": patience_counter,
-        }
-        final_ckp_path = os.path.join(cfg.train.output_dir, "final_model.pth")
-        torch.save(checkpoint_state, final_ckp_path)
+        checkpointer.save("final")
 
     metric_logger.synchronize_between_processes()
     torch.distributed.destroy_process_group()
